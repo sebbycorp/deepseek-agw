@@ -68,4 +68,5 @@ The UI walkthrough — provider form, model caps, the `maxTokens` gotcha — is 
 - **Ports are the controller defaults**, not the standalone `14010` / `4002`. Admin UI: `kubectl port-forward -n agentgateway-system deploy/agentgateway-proxy 15000` → <http://127.0.0.1:15000/ui>. Jaeger: `kubectl port-forward -n telemetry svc/jaeger-ui 16686:16686`.
 - **The cost catalog must be attached to the Gateway** via `AgentgatewayParameters`. A GatewayClass-level catalog is ignored.
 - **The tracing policy points across namespaces** (`agentgateway-system` → `telemetry`). If traces never arrive, check whether your version wants a `ReferenceGrant` in `telemetry` for that reference.
+- **Governance is standalone-only in this repo.** [`agentgateway-governed.yaml`](../agentgateway-governed.yaml) adds virtual keys, a token rate limit, and prompt guards to the local setup ([Step 8](../README.md#step-8-turn-on-governance)). The cluster equivalents are fields on `AgentgatewayPolicy` rather than another file here — I haven't run them, so rather than ship manifests I can't vouch for, start from the upstream policy reference.
 - **MCP is not wired**, here or standalone.

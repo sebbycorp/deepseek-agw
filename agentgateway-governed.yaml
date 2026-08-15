@@ -1,0 +1,86 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+# Standalone config with governance turned on. No secrets in this file.
+#
+# Difference from agentgateway.yaml: that one proves the path works — the real
+# key stays in the gateway and any token gets you in. This one adds the rules:
+#
+#   govern  llm.policies.apiKey (strict) + localRateLimit
+#   secure  guardrails reject secrets in the prompt; real key still process-only
+#   route   llm.models "*" -> openAI
+#   log     admin UI Logs (adminAddr below)
+#   cost    config.modelCatalog, attributed per virtual key
+#
+# Two env vars, both sourced from the mode-600 file by start-agw.sh:
+#   OPENAI_API_KEY    the real provider key. Never leaves this process.
+#   DSH_VIRTUAL_KEY   what DeepSeek Harness presents. Yours to invent, e.g. sk-dsh-...
+#
+# Run it with:  AGW_CONFIG=./agentgateway-governed.yaml ./start-agw.sh
+
+config:
+  adminAddr: localhost:14010
+  statsAddr: "[::]:14030"
+  readinessAddr: "[::]:14031"
+  modelCatalog:
+    - file: ./costs/catalog.json
+  tracing:
+    otlpEndpoint: http://localhost:4317
+    randomSampling: true
+
+gateways:
+  default:
+    port: 4002
+
+llm:
+  policies:
+    # GOVERN — who is allowed through this door, and under what name.
+    # strict means an unrecognized token is rejected. It also puts the
+    # metadata below on every call, so the cost page can say who spent it.
+    apiKey:
+      mode: strict
+      keys:
+        - key: "$DSH_VIRTUAL_KEY"
+          metadata:
+            user: dsh
+            tier: local
+
+    # GOVERN — a ceiling the harness cannot talk its way past.
+    # Gateway-wide on standalone. 200k tokens/hour is generous for a laptop
+    # and still stops an agent stuck in a loop.
+    localRateLimit:
+      - maxTokens: 200000
+        tokensPerFill: 200000
+        fillInterval: 3600s
+        type: tokens
+
+  models:
+    - name: "*"
+      provider: openAI
+      params:
+        apiKey: "$OPENAI_API_KEY"
+        # Count the prompt before OpenAI sees it, so an oversized turn
+        # can be refused without spending anything.
+        tokenize: true
+
+      # SECURE — an agent with shell access can read files. This stops the
+      # obvious accidents from leaving the laptop in a prompt.
+      guardrails:
+        request:
+          - regex:
+              action: reject
+              rules:
+                - pattern: "api[_-]?key[=:]\\s*\\S+"
+                - pattern: "sk-[A-Za-z0-9_-]{10,}"
+                - builtin: email
+            rejection:
+              status: 400
+              headers:
+                set:
+                  content-type: "application/json"
+              body: |
+                {
+                  "error": {
+                    "message": "Request rejected: sensitive content",
+                    "type": "invalid_request_error",
+                    "code": "content_policy_violation"
+                  }
+                }

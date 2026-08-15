@@ -2,7 +2,15 @@
 
 Run **standalone agentgateway** in front of **DeepSeek Harness** (`dsh`), so the agent UI never sees your real OpenAI key.
 
-Harness talks to `http://127.0.0.1:4002/v1` with a dummy token. The gateway is the only process that holds `OPENAI_API_KEY`, and it is where token counts, USD cost, and traces show up. This is the setup we actually ran on one box — no cluster required.
+Harness talks to `http://127.0.0.1:4002/v1` with a token you invent. The gateway is the only process that holds `OPENAI_API_KEY`, and because every call passes through it, it is also the one place that can **govern, secure, route, log, and cost** the traffic Harness produces. This is the setup we actually ran on one box — no cluster required.
+
+| Job | Where it lives |
+| --- | --- |
+| **Govern** | Virtual keys, a token rate limit — [`agentgateway-governed.yaml`](agentgateway-governed.yaml), [Step 8](#step-8-turn-on-governance) |
+| **Secure** | Real key in the gateway process only; prompt guards reject secrets on the way out |
+| **Route** | `llm.models` maps what Harness asks for onto a provider and model version |
+| **Log** | Admin UI → Logs, every call with its status and resolved model |
+| **Cost** | Cost catalog turns tokens into dollars, attributed per virtual key |
 
 <p align="center">
   <img src="docs/shots/harness-run.gif" alt="DeepSeek Harness picking gpt-4o on the agentgateway provider and answering a turn" width="720">
@@ -208,6 +216,45 @@ llm-pi-ai:
 | First turn fails on a missing key | The session is on `deepseek-official`, and there is no `DEEPSEEK_API_KEY` on this box | **New Session** → `agw` / `gpt-4o` |
 | `missing .secrets/openai.env` on start | The mode-600 key file doesn't exist | Redo [Step 2](#step-2-store-the-openai-key-outside-the-repo) |
 | No rows in Analytics or Logs | Harness is still talking to a DeepSeek provider | Recheck the base URL in [Step 6](#step-6-point-harness-at-the-gateway) |
+| Every call returns **401/403** after Step 8 | `apiKey.mode: strict` and Harness is still sending the old token | Put `$DSH_VIRTUAL_KEY` in `GATEWAY_API_KEY` |
+| A normal prompt returns **400 content_policy_violation** | A prompt guard matched — the `email` builtin is easy to trip | Loosen the rules in `agentgateway-governed.yaml` |
+
+## Step 8: Turn on governance
+
+Steps 1–7 get the key out of the app and put a number on the traffic. That covers secure, route, log, and cost. What's missing is **govern** — nothing yet decides *who* may call, how much they may spend, or what may be sent.
+
+[`agentgateway-governed.yaml`](agentgateway-governed.yaml) is the same config with three additions:
+
+| Addition | What it does |
+| --- | --- |
+| `llm.policies.apiKey` (`mode: strict`) | Unrecognized tokens are rejected. Recognized ones carry `user: dsh` onto the cost page. |
+| `llm.policies.localRateLimit` | 200k tokens/hour, gateway-wide. A ceiling an agent in a loop cannot argue with. |
+| `guardrails.request.regex` | Rejects prompts containing an API key, an `sk-` string, or an email before they leave the box. |
+
+The token Harness sends stops being arbitrary and becomes a **virtual key** — still not an OpenAI key, still useless anywhere else, but now recognized and attributed. Pick a value and add it to the same mode-600 file:
+
+```bash
+printf 'export DSH_VIRTUAL_KEY=sk-dsh-local-harness\n' >> .secrets/openai.env
+```
+
+Restart against the governed config:
+
+```bash
+AGW_CONFIG=./agentgateway-governed.yaml ./start-agw.sh
+```
+
+Then update Harness to send that value instead of the old placeholder — **Settings → Models → agentgateway → API key**, or the env before `npx`:
+
+```bash
+export GATEWAY_API_KEY=sk-dsh-local-harness
+npx @deepseek-ai/dsh web
+```
+
+Nothing else about Harness changes. That is the point of putting the control point outside the app.
+
+> **Note:** `start-agw.sh` scans the config for `$VAR` references and refuses to start if one is empty, so a missing `DSH_VIRTUAL_KEY` fails loudly instead of booting a gateway that rejects every request.
+
+Two things worth knowing before you rely on this. The rate limit is **gateway-wide** on standalone, not per key — per-key daily budgets need a remote rate-limit server. And `tokenize: true` counts the prompt before OpenAI sees it, so an oversized turn is refused without spending anything.
 
 ## Reference
 
@@ -229,11 +276,12 @@ llm-pi-ai:
 | What | Where |
 | --- | --- |
 | Gateway config (no secret) | [`agentgateway.yaml`](agentgateway.yaml) |
-| Gateway launcher | [`start-agw.sh`](start-agw.sh) |
+| Same, with governance | [`agentgateway-governed.yaml`](agentgateway-governed.yaml) |
+| Gateway launcher | [`start-agw.sh`](start-agw.sh) — `AGW_CONFIG` picks the config |
 | Kubernetes manifests | [`k8s/`](k8s/) — see [`k8s/README.md`](k8s/README.md) |
-| Real OpenAI key (mode 600, never committed) | `.secrets/openai.env` |
+| Real OpenAI key + virtual key (mode 600, never committed) | `.secrets/openai.env` |
 | Harness provider + model caps | `$DSH_HOME/settings.yaml` (usually `~/.dsh/settings.yaml`) |
-| Harness dummy token | `$DSH_HOME/.credentials.yaml` |
+| Harness token — dummy or virtual key, never the OpenAI key | `$DSH_HOME/.credentials.yaml` |
 
 **Captures** — all stills and clips live in [`docs/shots/`](docs/shots/), keyed to the steps above:
 
