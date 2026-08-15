@@ -1,8 +1,10 @@
 # deepseek-agw
 
-DeepSeek Harness (`dsh`) is a local agent UI. I put standalone **agentgateway** in front of it so the UI never sees the real OpenAI key.
+This is the setup we actually ran: **standalone** agentgateway in front of local DeepSeek Harness.
 
-Harness talks to `http://127.0.0.1:4002/v1` with a dummy token. The gateway is the only process that holds `OPENAI_API_KEY`. Token stats, USD cost, and Jaeger traces live there. Same pattern later for MCP — not wired in this first pass.
+`dsh` is a local agent UI. I put the gateway in the middle so the UI never sees the real OpenAI key. Harness talks to `http://127.0.0.1:4002/v1` with a dummy token. The gateway is the only process that holds `OPENAI_API_KEY`. Token stats, USD cost, and Jaeger traces live there.
+
+Same pattern later for MCP — not wired in this first pass. Same pattern on Kubernetes is a shorter follow-up, not this story: [docs/kubernetes.md](docs/kubernetes.md).
 
 ## Architecture
 
@@ -14,7 +16,7 @@ flowchart LR
   agw --> jaeger["Jaeger :16686"]
 ```
 
-The key is not in GitHub, not in `$DSH_HOME`, and not in the harness process. A mode-600 file is sourced by `start-agw.sh` and exported into the gateway process only.
+The key is not in GitHub, not in `$DSH_HOME`, and not in the harness process. A mode-600 file is sourced by `start-agw.sh` and exported into the gateway process only. Sample config is [`agentgateway.yaml`](agentgateway.yaml) — `$OPENAI_API_KEY` placeholder, no secret.
 
 ## Commands
 
@@ -62,7 +64,7 @@ printf 'export OPENAI_API_KEY=sk-...\n' > .secrets/openai.env
 chmod 600 .secrets/openai.env
 ```
 
-Start the gateway (sample config is [`agentgateway.yaml`](agentgateway.yaml)):
+Start the gateway:
 
 ```
 ./start-agw.sh
@@ -105,8 +107,8 @@ Two things burned the first turn.
 
 ## GIFs
 
-A 5-question run will be recorded next. Drop the clips in [`docs/runs/`](docs/runs/).
+A 5-question standalone run will be recorded next. Drop the clips in [`docs/runs/`](docs/runs/). No cluster screenshots — we did not run Kubernetes first.
 
 ## What this is not
 
-MCP is not wired. Same gateway pattern later. The sample yaml has `$OPENAI_API_KEY` only — no real key in this repo.
+MCP is not wired. Same gateway pattern later. The sample yaml has `$OPENAI_API_KEY` only — no real key in this repo. Kubernetes is the same idea with a Secret instead of a 600 file; that page is shorter on purpose.
