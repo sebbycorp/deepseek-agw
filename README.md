@@ -230,6 +230,7 @@ llm-pi-ai:
 | --- | --- |
 | Gateway config (no secret) | [`agentgateway.yaml`](agentgateway.yaml) |
 | Gateway launcher | [`start-agw.sh`](start-agw.sh) |
+| Kubernetes manifests | [`k8s/`](k8s/) — see [`k8s/README.md`](k8s/README.md) |
 | Real OpenAI key (mode 600, never committed) | `.secrets/openai.env` |
 | Harness provider + model caps | `$DSH_HOME/settings.yaml` (usually `~/.dsh/settings.yaml`) |
 | Harness dummy token | `$DSH_HOME/.credentials.yaml` |
@@ -252,5 +253,10 @@ Standalone only. No cluster screenshots. No real API key in any capture.
 
 ## Next steps
 
-- **Kubernetes** — same pattern, with a Secret instead of a mode-600 file: [docs/kubernetes.md](docs/kubernetes.md). Shorter on purpose; we did not stand a cluster up for this repo.
+- **Kubernetes** — same pattern, with a Secret instead of a mode-600 file. Manifests are in [`k8s/`](k8s/); the walkthrough is [docs/kubernetes.md](docs/kubernetes.md). Untested — we did not stand a cluster up for this repo.
+
+  ```bash
+  ./k8s/install.sh   # Gateway API + agentgateway charts, Secret, cost catalog, manifests
+  ```
+
 - **MCP** — not wired in this first pass. Same gateway in the middle, later.
