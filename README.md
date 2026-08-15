@@ -1,12 +1,14 @@
-# deepseek-agw
+# DeepSeek Harness + agentgateway
 
-This is the setup we actually ran: **standalone** agentgateway in front of local DeepSeek Harness.
+Run **standalone agentgateway** in front of **DeepSeek Harness** (`dsh`), so the agent UI never sees your real OpenAI key.
 
-`dsh` is a local agent UI. I put the gateway in the middle so the UI never sees the real OpenAI key. Harness talks to `http://127.0.0.1:4002/v1` with a dummy token. The gateway is the only process that holds `OPENAI_API_KEY`. Token stats, USD cost, and Jaeger traces live there.
+Harness talks to `http://127.0.0.1:4002/v1` with a dummy token. The gateway is the only process that holds `OPENAI_API_KEY`, and it is where token counts, USD cost, and traces show up. This is the setup we actually ran on one box — no cluster required.
 
-Same pattern later for MCP — not wired in this first pass. Same pattern on Kubernetes is a shorter follow-up, not this story: [docs/kubernetes.md](docs/kubernetes.md).
+<p align="center">
+  <img src="docs/shots/harness-run.gif" alt="DeepSeek Harness picking gpt-4o on the agentgateway provider and answering a turn" width="720">
+</p>
 
-## Architecture
+## How it works
 
 ```mermaid
 flowchart LR
@@ -16,37 +18,66 @@ flowchart LR
   agw --> jaeger["Jaeger :16686"]
 ```
 
-The key is not in GitHub, not in `$DSH_HOME`, and not in the harness process. A mode-600 file is sourced by `start-agw.sh` and exported into the gateway process only. Sample config is [`agentgateway.yaml`](agentgateway.yaml) — `$OPENAI_API_KEY` placeholder, no secret.
+| Piece | Holds the real key? | What it does |
+| --- | --- | --- |
+| DeepSeek Harness (`:3080`) | No — dummy token | Agent UI. Speaks OpenAI-compatible to the gateway. |
+| agentgateway (`:4002`) | **Yes** — process env only | Injects the real key, meters tokens and cost, emits traces. |
+| Admin UI (`:14010`) | No | Analytics, Logs, and Costs for the traffic above. |
+| Jaeger (`:16686`) | No | OTLP traces from the gateway. |
 
-## Commands
+The key is not in GitHub, not in `$DSH_HOME`, and not in the harness process. A mode-600 file is sourced by [`start-agw.sh`](start-agw.sh) and exported into the gateway process only. The sample [`agentgateway.yaml`](agentgateway.yaml) carries a `$OPENAI_API_KEY` placeholder — no secret.
 
-This is what I typed on the box. agentgateway **1.4.1**. Node **24** — Node 20 is too old for current `dsh`.
+## Before you begin
 
-Node 24:
+You need:
 
-```
+- **Node 24.** Node 20 is too old for current `dsh`.
+- **agentgateway 1.4.1** and `agctl`, pinned.
+- **Docker**, for Jaeger all-in-one (optional — skip [Step 3](#step-3-start-jaeger-optional) if you don't want traces).
+- An **OpenAI API key** you are willing to put in a local mode-600 file.
+
+Install Node 24:
+
+```bash
 nvm install 24
 nvm use 24
 node -v
 ```
 
-Gateway + `agctl`, pinned:
+Install the gateway and `agctl`, pinned to the version this guide was written against:
 
-```
+```bash
 curl -sL https://agentgateway.dev/install | bash -s -- --version v1.4.1
 agentgateway --version
 ```
 
-Cost catalog (once). Lands in `config.modelCatalog`:
+## Step 1: Import the cost catalog
 
-```
+Do this once. It lands in `config.modelCatalog` and is what turns raw token counts into USD on the Costs page.
+
+```bash
 mkdir -p costs
 agctl costs import --source models.dev --providers openai --out ./costs/catalog.json
 ```
 
-Jaeger all-in-one:
+## Step 2: Store the OpenAI key outside the repo
 
+The real key goes in a mode-600 file. Do not commit it. Do not put it in the YAML.
+
+```bash
+mkdir -p .secrets
+umask 077
+printf 'export OPENAI_API_KEY=sk-...\n' > .secrets/openai.env
+chmod 600 .secrets/openai.env
 ```
+
+> **Note:** `start-agw.sh` refuses to start if this file is missing or if `OPENAI_API_KEY` is empty after sourcing it.
+
+## Step 3: Start Jaeger (optional)
+
+The sample config ships traces to `http://localhost:4317`. Bring up Jaeger all-in-one to receive them:
+
+```bash
 docker run -d --name jaeger \
   -e COLLECTOR_OTLP_ENABLED=true \
   -p 16686:16686 \
@@ -55,91 +86,103 @@ docker run -d --name jaeger \
   jaegertracing/all-in-one:latest
 ```
 
-Real key in a 600 file. Do not commit it. Do not put it in the yaml.
+Jaeger UI: <http://127.0.0.1:16686>
 
-```
-mkdir -p .secrets
-umask 077
-printf 'export OPENAI_API_KEY=sk-...\n' > .secrets/openai.env
-chmod 600 .secrets/openai.env
-```
+## Step 4: Start the gateway
 
-Start the gateway. `OPENAI_API_KEY` is in this process only.
-
-```
+```bash
 ./start-agw.sh
 ```
 
-Admin UI: http://127.0.0.1:14010/ui · costs: http://127.0.0.1:14010/ui/llm/costs · LLM listener `:4002` · metrics `:14030`.
+`OPENAI_API_KEY` now exists in this process and nowhere else. Confirm the gateway is up before you touch Harness:
 
-Harness, dummy token — not the OpenAI key:
+| Endpoint | URL |
+| --- | --- |
+| Admin UI | <http://127.0.0.1:14010/ui> |
+| Costs | <http://127.0.0.1:14010/ui/llm/costs> |
+| OpenAI-compat listener | `http://127.0.0.1:4002/v1` |
+| Metrics | <http://127.0.0.1:14030> |
 
-```
+## Step 5: Start DeepSeek Harness
+
+Export the **dummy** token — not the OpenAI key — and start the UI:
+
+```bash
 export GATEWAY_API_KEY=local-harness-not-openai
 npx @deepseek-ai/dsh web
 ```
 
-UI is http://127.0.0.1:3080. Pointing harness at the gateway is the next section. Required.
+Harness UI: <http://127.0.0.1:3080>
 
-## Configure DeepSeek Harness with agentgateway
+> **Important:** Don't send a turn yet. Out of the box the first turn hits `deepseek-official` with no `DEEPSEEK_API_KEY`, or `gpt-4o` with `maxTokens` 32768 and a 400. Step 6 is the wiring that fixes both.
 
-This is the wiring. Skip it and the first turn hits `deepseek-official` with no `DEEPSEEK_API_KEY`, or `gpt-4o` with `maxTokens` 32768 and a 400.
+## Step 6: Point Harness at the gateway
 
-Gateway is already up. Real OpenAI key is only in the agentgateway process env. Confirm the admin UI at http://127.0.0.1:14010/ui and the costs page at http://127.0.0.1:14010/ui/llm/costs before you touch harness.
+Configure this in the UI at <http://127.0.0.1:3080>. (Prefer editing files? See [Configure by file](#configure-by-file-instead).)
 
-Captions match the standalone box we actually ran. No real API key is on screen. PNG stills belong in [`docs/shots/`](docs/shots/) under the names below. GIFs for the same flow are reserved — this launch is stills only.
+### 1. Open **Settings → Models**
 
-### UI — http://127.0.0.1:3080
+Enter API keys for the providers you want. DeepSeek stays red — there is no `DEEPSEEK_API_KEY` on this box. The custom agentgateway row is green.
 
-1. Open the harness UI. **New Session**. Pick **agentgateway / gpt-4o**. Do not pick `deepseek-official`.
+![Settings → Models: DeepSeek red, agentgateway custom provider green](docs/shots/harness-settings.png)
 
-   The picker groups DeepSeek models separately from the custom provider. The one we used is labeled `agentgateway (OpenAI via dummy token)`. `gpt-4o` is selected.
+### 2. Add a custom provider
 
-   ![Model picker: gpt-4o on the agentgateway provider](docs/shots/harness-model-picker.png)
+Add one, or edit the entry already in `$DSH_HOME/settings.yaml`. Dummy token only.
 
-2. **Settings → Models**. Enter API keys for the providers you want. DeepSeek stays red here — there is no `DEEPSEEK_API_KEY` on this box. The custom agentgateway row is green.
+| Field | Value |
+| --- | --- |
+| Provider ID (in `settings.yaml`) | `agw` |
+| Display name | `agentgateway (OpenAI via dummy token)` |
+| API protocol | `openai-completions` |
+| Base URL | `http://127.0.0.1:4002/v1` |
+| `apiKeyEnv` | `GATEWAY_API_KEY` |
+| Key value | `local-harness-not-openai` — **not** the real OpenAI key |
 
-   ![Settings → Models: DeepSeek red, agentgateway custom provider green](docs/shots/harness-settings.png)
+![Provider detail: base URL 127.0.0.1:4002/v1, protocol openai-completions, dummy key already set](docs/shots/harness-settings-detail.png)
 
-3. **Add a custom provider**, or edit the one already in `$DSH_HOME/settings.yaml`. Fill the form. Dummy token only.
+### 3. Add models and cap max output tokens
 
-   - Provider ID in `$DSH_HOME/settings.yaml`: `agw`
-   - Display name in the UI: `agentgateway (OpenAI via dummy token)`
-   - API protocol: `openai-completions`
-   - Base URL: `http://127.0.0.1:4002/v1`
-   - apiKeyEnv: `GATEWAY_API_KEY`
-   - Key value: `local-harness-not-openai` — **not** the real OpenAI key
+Add at least `gpt-4o` and `gpt-4o-mini`, and set **max output tokens to 8192** (16384 also works).
 
-   ![Provider detail: base URL 127.0.0.1:4002/v1, protocol openai-completions, dummy key already set](docs/shots/harness-settings-detail.png)
+> **Warning:** The Harness default is 32768. That default makes `gpt-4o` return **400** — its ceiling is 16384 completion tokens.
 
-4. Add models. At least `gpt-4o` and `gpt-4o-mini`. Set **max output tokens to 8192** (16384 also works). The harness default is 32768. That default makes `gpt-4o` return 400 (max completion tokens 16384).
+![Customized model catalog: gpt-4o max output tokens 8192](docs/shots/harness-models-max-tokens.png)
 
-   ![Customized model catalog: gpt-4o max output tokens 8192](docs/shots/harness-models-max-tokens.png)
+### 4. Start a new session on the gateway provider
 
-5. Two short turns so you can see it work. Session title on this box was "Simple Arithmetic Query".
+**New Session** → pick **agentgateway / gpt-4o**. Do not pick `deepseek-official`. The picker groups the DeepSeek models separately from the custom provider, which is labeled `agentgateway (OpenAI via dummy token)`.
 
-   - "What is 2+2? Reply with just the number." → `4`
-   - "Name the capital of France in one word." → `Paris`
+![Model picker: gpt-4o on the agentgateway provider](docs/shots/harness-model-picker.png)
 
-   ![Two-question run through gpt-4o: 4 and Paris](docs/shots/harness-run.png)
+## Step 7: Verify the traffic
 
-6. Open the gateway admin. Analytics and Logs are how you confirm the dummy-token path actually hit OpenAI.
+Send two short turns so there is something to look at. The session on this box was titled "Simple Arithmetic Query":
 
-   Analytics — http://127.0.0.1:14010/ui — "Analyze LLM traffic by model, user, and provider." This run: **39 tokens / 2 calls**.
+- `What is 2+2? Reply with just the number.` → `4`
+- `Name the capital of France in one word.` → `Paris`
 
-   ![agentgateway Analytics: 39 tokens and 2 calls in the last 24 hours](docs/shots/agw-ui.png)
+![Two-question run through gpt-4o: 4 and Paris](docs/shots/harness-run.png)
 
-   Logs — inspect the two `CHAT` / `200` rows. Model routing shows `gpt-4o-mini` → `gpt-4o-mini-2024-07-18`, provider `openai`. No key on this page.
+Now open the gateway admin at <http://127.0.0.1:14010/ui>. **Analytics** and **Logs** are how you confirm the dummy-token path actually reached OpenAI.
 
-   ![agentgateway Logs: two CHAT 200 calls](docs/shots/agw-logs.png)
+**Analytics** — "Analyze LLM traffic by model, user, and provider." This run: **39 tokens / 2 calls**, $0.0000072.
 
-### Files — `$DSH_HOME` (usually `~/.dsh`)
+![agentgateway Analytics: 39 tokens and 2 calls in the last 24 hours](docs/shots/agw-ui.png)
 
-The UI writes here. You can edit the same files by hand.
+![agentgateway admin UI: Analytics and cost totals for the run](docs/shots/agw-costs.gif)
 
-`$DSH_HOME/settings.yaml` — provider and model caps. No OpenAI key.
+**Logs** — inspect the two `CHAT` / `200` rows. Model routing shows `gpt-4o-mini` → `gpt-4o-mini-2024-07-18`, provider `openai`. No key on this page.
 
-```
+![agentgateway Logs: two CHAT 200 calls](docs/shots/agw-logs.png)
+
+## Configure by file instead
+
+The UI writes to `$DSH_HOME` (usually `~/.dsh`). You can edit the same files by hand.
+
+**`$DSH_HOME/settings.yaml`** — provider and model caps. No OpenAI key:
+
+```yaml
 llm-pi-ai:
   providers:
     agw:
@@ -153,49 +196,61 @@ llm-pi-ai:
           maxTokens: 8192
 ```
 
-`$DSH_HOME/.credentials.yaml` — dummy token only. The Models page stores `GATEWAY_API_KEY` = `local-harness-not-openai` here (write-only in the UI). That is not `OPENAI_API_KEY`. Do not put the real key in `$DSH_HOME`.
+**`$DSH_HOME/.credentials.yaml`** — dummy token only. The Models page stores `GATEWAY_API_KEY` = `local-harness-not-openai` here (write-only in the UI). That is not `OPENAI_API_KEY`.
 
-If you exported `GATEWAY_API_KEY` before `npx @deepseek-ai/dsh web`, harness can resolve the env instead. Same dummy. Same rule.
+> **Warning:** Never put the real OpenAI key in `$DSH_HOME`. If you exported `GATEWAY_API_KEY` before running `npx @deepseek-ai/dsh web`, Harness resolves it from the env instead. Same dummy, same rule.
 
-## The one gotcha
+## Troubleshooting
 
-1. Default `maxTokens` is 32768. `gpt-4o` returns **400** above 16384 completion tokens. Use 16384 or 8192.
-2. First UI turn used `deepseek-official`. There is no `DEEPSEEK_API_KEY` here. **New Session** → `agw` / `gpt-4o`.
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `gpt-4o` returns **400** | `maxTokens` defaults to 32768; `gpt-4o` caps completion tokens at 16384 | Set max output tokens to 16384 or 8192 |
+| First turn fails on a missing key | The session is on `deepseek-official`, and there is no `DEEPSEEK_API_KEY` on this box | **New Session** → `agw` / `gpt-4o` |
+| `missing .secrets/openai.env` on start | The mode-600 key file doesn't exist | Redo [Step 2](#step-2-store-the-openai-key-outside-the-repo) |
+| No rows in Analytics or Logs | Harness is still talking to a DeepSeek provider | Recheck the base URL in [Step 6](#step-6-point-harness-at-the-gateway) |
 
-## Where to look
+## Reference
 
-- Harness UI: http://127.0.0.1:3080
-- Harness settings: `$DSH_HOME/settings.yaml` (usually `~/.dsh/settings.yaml`)
-- Harness dummy token: `$DSH_HOME/.credentials.yaml` — dummy only
-- agentgateway admin: http://127.0.0.1:14010/ui
-- Analytics: http://127.0.0.1:14010/ui (LLM → Analytics)
-- Logs: http://127.0.0.1:14010/ui (LLM → Logs)
-- Costs: http://127.0.0.1:14010/ui/llm/costs
-- Jaeger: http://127.0.0.1:16686
-- OpenAI-compat listener: http://127.0.0.1:4002/v1
-- Metrics: http://127.0.0.1:14030
+**Endpoints**
 
-## Screenshots / GIFs
+| What | Where |
+| --- | --- |
+| Harness UI | <http://127.0.0.1:3080> |
+| agentgateway admin | <http://127.0.0.1:14010/ui> |
+| Analytics | <http://127.0.0.1:14010/ui> (LLM → Analytics) |
+| Logs | <http://127.0.0.1:14010/ui> (LLM → Logs) |
+| Costs | <http://127.0.0.1:14010/ui/llm/costs> |
+| Jaeger | <http://127.0.0.1:16686> |
+| OpenAI-compat listener | `http://127.0.0.1:4002/v1` |
+| Metrics | <http://127.0.0.1:14030> |
 
-The configure section above is the walkthrough. Same reserved stills in [`docs/shots/`](docs/shots/):
+**Files**
+
+| What | Where |
+| --- | --- |
+| Gateway config (no secret) | [`agentgateway.yaml`](agentgateway.yaml) |
+| Gateway launcher | [`start-agw.sh`](start-agw.sh) |
+| Real OpenAI key (mode 600, never committed) | `.secrets/openai.env` |
+| Harness provider + model caps | `$DSH_HOME/settings.yaml` (usually `~/.dsh/settings.yaml`) |
+| Harness dummy token | `$DSH_HOME/.credentials.yaml` |
+
+**Captures** — all stills and clips live in [`docs/shots/`](docs/shots/), keyed to the steps above:
 
 | File | What |
 | --- | --- |
-| `docs/shots/harness-model-picker.png` | Model picker — `gpt-4o` on `agentgateway (OpenAI via dummy token)` |
-| `docs/shots/harness-settings.png` | Settings → Models list |
-| `docs/shots/harness-settings-detail.png` | Base URL `http://127.0.0.1:4002/v1`, protocol `openai-completions`, dummy key |
-| `docs/shots/harness-models-max-tokens.png` | Catalog — `gpt-4o` max output tokens **8192** |
-| `docs/shots/harness-run.png` | Two-question run: `4` and `Paris` |
-| `docs/shots/agw-ui.png` | agentgateway Analytics — 39 tokens / 2 calls |
-| `docs/shots/agw-logs.png` | agentgateway Logs — two `CHAT` / `200` rows |
+| `harness-run.gif` | New Session, pick agentgateway / `gpt-4o`, a turn |
+| `harness-settings.png` | Settings → Models list |
+| `harness-settings-detail.png` | Base URL `http://127.0.0.1:4002/v1`, protocol `openai-completions`, dummy key |
+| `harness-models-max-tokens.png` | Catalog — `gpt-4o` max output tokens **8192** |
+| `harness-model-picker.png` | Model picker — `gpt-4o` on `agentgateway (OpenAI via dummy token)` |
+| `harness-run.png` | Two-question run: `4` and `Paris` |
+| `agw-ui.png` | agentgateway Analytics — 39 tokens / 2 calls |
+| `agw-costs.gif` | Admin UI — Analytics and cost totals for the run |
+| `agw-logs.png` | agentgateway Logs — two `CHAT` / `200` rows |
 
-GIFs were not recorded this launch. Reserved names if you drop clips later:
+Standalone only. No cluster screenshots. No real API key in any capture.
 
-- `docs/shots/harness-run.gif` — New Session, pick agentgateway / `gpt-4o`, a turn
-- `docs/shots/agw-costs.gif` — http://127.0.0.1:14010/ui/llm/costs
+## Next steps
 
-Standalone only. No cluster screenshots. No real API key in any still.
-
-## What this is not
-
-MCP is not wired. Same gateway pattern later. The sample yaml has `$OPENAI_API_KEY` only — no real key in this repo. Kubernetes is the same idea with a Secret instead of a 600 file; that page is shorter on purpose.
+- **Kubernetes** — same pattern, with a Secret instead of a mode-600 file: [docs/kubernetes.md](docs/kubernetes.md). Shorter on purpose; we did not stand a cluster up for this repo.
+- **MCP** — not wired in this first pass. Same gateway in the middle, later.
