@@ -98,7 +98,7 @@ spec:
 EOF
 ```
 
-Local harness. Dummy token. Same `maxTokens` / pick-`agw` gotcha as the README.
+Local harness. Dummy token. Full UI + `$DSH_HOME` walkthrough is **Configure DeepSeek Harness with agentgateway** in the README — same form, baseURL is the port-forward. Same `maxTokens` / pick-`agw` gotcha.
 
 ```
 kubectl port-forward -n agentgateway-system deploy/agentgateway-proxy 8080:80
