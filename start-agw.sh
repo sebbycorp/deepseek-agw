@@ -25,4 +25,25 @@ if [[ -z "${OPENAI_API_KEY:-}" ]]; then
   exit 1
 fi
 
-exec agentgateway -f "$ROOT/agentgateway.yaml"
+# Which config to run. Default is the plain one; the governed config adds
+# virtual keys, a rate limit, and prompt guards.
+#   AGW_CONFIG=./agentgateway-governed.yaml ./start-agw.sh
+CONFIG="${AGW_CONFIG:-$ROOT/agentgateway.yaml}"
+
+if [[ ! -f "$CONFIG" ]]; then
+  echo "missing config $CONFIG" >&2
+  exit 1
+fi
+
+# Any $VAR the config expects must exist, or agentgateway starts with an
+# empty credential and every request fails in a way that looks like a
+# Harness problem. Check up front instead.
+while read -r var; do
+  if [[ -z "${!var:-}" ]]; then
+    echo "$CONFIG needs \$$var, which is empty after sourcing $SECRET" >&2
+    echo "add it to that file, e.g. export $var=sk-dsh-..." >&2
+    exit 1
+  fi
+done < <(grep -oE '\$[A-Z][A-Z0-9_]+' "$CONFIG" | tr -d '$' | sort -u)
+
+exec agentgateway -f "$CONFIG"
